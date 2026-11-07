@@ -68,7 +68,8 @@ enum SheetKind: Identifiable {
 }
 
 final class RadioModel: NSObject, ObservableObject, AVPlayerItemMetadataOutputPushDelegate {
-    static let slotCount = 10
+    /// Prvních 10 míst je vždy vidět (zkratky ⌘1…⌘0); další předvolby přibývají bez omezení.
+    static let baseSlots = 10
 
     @Published var presets: [Station?] { didSet { savePresets() } }
     @Published private(set) var current: Station?
@@ -105,8 +106,8 @@ final class RadioModel: NSObject, ObservableObject, AVPlayerItemMetadataOutputPu
         if let data = UserDefaults.standard.data(forKey: "presets.v1"),
            let saved = try? JSONDecoder().decode([Station?].self, from: data) {
             var p = saved
-            if p.count < Self.slotCount { p += Array(repeating: nil, count: Self.slotCount - p.count) }
-            presets = Array(p.prefix(Self.slotCount))
+            if p.count < Self.baseSlots { p += Array(repeating: nil, count: Self.baseSlots - p.count) }
+            presets = p
         } else {
             presets = DefaultStations.all
         }
@@ -301,16 +302,28 @@ final class RadioModel: NSObject, ObservableObject, AVPlayerItemMetadataOutputPu
     // MARK: Presets
 
     func save(_ station: Station, to slot: Int) {
-        guard slot >= 0, slot < presets.count else { return }
         var s = station
         s.id = UUID()
-        presets[slot] = s
+        setPreset(s, at: slot)
     }
 
     func remove(_ slot: Int) {
-        if presets[slot]?.id == current?.id { /* hraje dál, jen už není v předvolbách */ }
-        presets[slot] = nil
+        guard slot < presets.count else { return }
+        // prvních 10 míst zůstává (jen se uvolní), další předvolby se odeberou celé
+        if slot >= Self.baseSlots { presets.remove(at: slot) } else { presets[slot] = nil }
     }
+
+    /// Uloží stanici na místo; index za koncem seznamu = nová předvolba navíc.
+    func setPreset(_ station: Station, at slot: Int) {
+        guard slot >= 0 else { return }
+        if slot < presets.count { presets[slot] = station } else { presets.append(station) }
+    }
+
+    /// Kam se uloží nová stanice: první volné místo, jinak nové místo na konci.
+    var nextFreeSlot: Int { presets.firstIndex(where: { $0 == nil }) ?? presets.count }
+
+    /// Počet zobrazených dlaždic: když nic není volné, přidá se jedna prázdná „Přidat předvolbu“.
+    var displayedSlots: Int { presets.contains(where: { $0 == nil }) ? presets.count : presets.count + 1 }
 
     func move(_ slot: Int, by delta: Int) {
         let target = slot + delta
@@ -593,17 +606,29 @@ struct NowPlayingCard: View {
 struct PresetsSection: View {
     @EnvironmentObject var m: RadioModel
     private let cols = [GridItem(.flexible(), spacing: 10), GridItem(.flexible(), spacing: 10)]
+    private var grid: some View {
+        LazyVGrid(columns: cols, spacing: 10) {
+            ForEach(0..<m.displayedSlots, id: \.self) { PresetCell(index: $0) }
+        }
+    }
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack(alignment: .firstTextBaseline) {
                 Text("Předvolby").font(.ui(17, bold: true))
                 Spacer()
-                Text("\(m.savedCount) z \(RadioModel.slotCount) uložených")
+                Text(m.savedCount == 1 ? "1 uložená" : m.savedCount < 5 ? "\(m.savedCount) uložené" : "\(m.savedCount) uložených")
                     .font(.ui(12, italic: true)).foregroundStyle(Theme.muted)
             }
-            LazyVGrid(columns: cols, spacing: 10) {
-                ForEach(0..<RadioModel.slotCount, id: \.self) { PresetCell(index: $0) }
-            }
+            #if os(macOS)
+            // na Macu se okno nenafukuje: víc než 6 řad se posouvá
+            let rows = (m.displayedSlots + 1) / 2
+            if rows > 6 {
+                ScrollView { grid.padding(.trailing, 2) }
+                    .frame(height: 5 * 66 + 34) // poslední řada napůl vykukuje = jde posouvat
+            } else { grid }
+            #else
+            grid
+            #endif
             Button { m.sheet = .search(slot: nil) } label: {
                 Label("Vyhledat další stanici", systemImage: "magnifyingglass")
                     .frame(maxWidth: .infinity)
@@ -621,14 +646,15 @@ struct PresetCell: View {
     @State private var hover = false
 
     var body: some View {
-        let st = m.presets[index]
+        let st = index < m.presets.count ? m.presets[index] : nil
+        let extra = index >= m.presets.count
         let active = st != nil && st?.id == m.current?.id && m.state != .stopped
         HStack(spacing: 10) {
             VStack(alignment: .leading, spacing: 1) {
-                Text(st?.name ?? "Volné místo")
+                Text(st?.name ?? (extra ? "Přidat předvolbu" : "Volné místo"))
                     .font(st == nil ? .ui(14, italic: true) : .ui(15, bold: true))
                     .foregroundStyle(st == nil ? Theme.muted : Theme.ink)
-                Text(st?.subtitle ?? "Klikněte a vyberte stanici")
+                Text(st?.subtitle ?? (extra ? "Další místo pro stanici" : "Klikněte a vyberte stanici"))
                     .font(.ui(12))
                     .foregroundStyle(Theme.muted)
             }
@@ -641,7 +667,7 @@ struct PresetCell: View {
                     Button("Nahradit jinou stanicí…") { m.sheet = .search(slot: index) }
                     Divider()
                     Button("Posunout dříve") { m.move(index, by: -1) }.disabled(index == 0)
-                    Button("Posunout později") { m.move(index, by: 1) }.disabled(index == RadioModel.slotCount - 1)
+                    Button("Posunout později") { m.move(index, by: 1) }.disabled(index >= m.presets.count - 1)
                     Divider()
                     Button("Odebrat", role: .destructive) { m.remove(index) }
                 } label: {
@@ -704,7 +730,7 @@ struct SearchSheet: View {
     @State private var errorText: String?
     @State private var savedURL: String?
 
-    private var targetSlot: Int? { slot ?? m.presets.firstIndex(where: { $0 == nil }) }
+    private var targetSlot: Int? { slot ?? m.nextFreeSlot }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -848,7 +874,7 @@ struct EditSheet: View {
                 Spacer()
                 Button("Zrušit") { dismiss() }.keyboardShortcut(.cancelAction)
                 Button("Uložit") {
-                    m.presets[slot] = build()
+                    m.setPreset(build(), at: slot)
                     dismiss()
                 }
                 .keyboardShortcut(.defaultAction)

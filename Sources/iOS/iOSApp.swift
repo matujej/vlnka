@@ -46,7 +46,7 @@ struct PhoneView: View {
                 Group {
                     switch kind {
                     case .search(let slot): SearchSheet(slot: slot)
-                    case .edit(let slot): EditSheet(slot: slot, station: m.presets[slot])
+                    case .edit(let slot): EditSheet(slot: slot, station: slot < m.presets.count ? m.presets[slot] : nil)
                     }
                 }
             }

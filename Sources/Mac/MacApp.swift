@@ -24,7 +24,7 @@ struct ContentView: View {
             Group {
                 switch kind {
                 case .search(let slot): SearchSheet(slot: slot)
-                case .edit(let slot): EditSheet(slot: slot, station: m.presets[slot])
+                case .edit(let slot): EditSheet(slot: slot, station: slot < m.presets.count ? m.presets[slot] : nil)
                 }
             }
             .environmentObject(m)
@@ -80,8 +80,20 @@ struct Masthead: View {
                 Text("Rádio do dílny").font(.ui(12)).foregroundStyle(Theme.muted)
             }
             Spacer()
-            IconButton(symbol: m.pinned ? "pin.fill" : "pin", on: m.pinned,
-                       help: "Držet okno vždy navrchu (⇧⌘T)") { m.pinned.toggle() }
+            if m.pinned {
+                // výrazné upozornění, ať je jasné, proč okno nezmizí pod jinými
+                Button { m.pinned = false } label: {
+                    Label("Vždy navrchu", systemImage: "pin.fill")
+                        .font(.ui(12, bold: true))
+                        .foregroundStyle(Theme.olive)
+                        .padding(.horizontal, 10).padding(.vertical, 5)
+                        .background(Capsule().fill(Theme.oliveSoft))
+                }
+                .buttonStyle(.plain)
+                .help("Okno zůstává nad ostatními aplikacemi – klikněte pro vypnutí")
+            } else {
+                IconButton(symbol: "pin", help: "Držet okno vždy navrchu") { m.pinned = true }
+            }
             IconButton(symbol: "arrow.down.right.and.arrow.up.left",
                        help: "Malé okno (⇧⌘M)") { m.mini = true }
         }
@@ -155,7 +167,7 @@ struct VlnkaApp: App {
                 Button("Předchozí předvolba") { model.step(-1) }
                     .keyboardShortcut(.leftArrow)
                 Divider()
-                ForEach(0..<RadioModel.slotCount, id: \.self) { i in
+                ForEach(0..<RadioModel.baseSlots, id: \.self) { i in
                     Button(model.presets[i]?.name ?? "Předvolba \(i + 1)") { model.playSlot(i) }
                         .keyboardShortcut(KeyEquivalent(Character("\((i + 1) % 10)")))
                         .disabled(model.presets[i] == nil)
@@ -164,7 +176,6 @@ struct VlnkaApp: App {
                 Button(model.mini ? "Plné okno" : "Minimalistické okno") { model.mini.toggle() }
                     .keyboardShortcut("m", modifiers: [.command, .shift])
                 Button(model.pinned ? "Nedržet navrchu" : "Držet vždy navrchu") { model.pinned.toggle() }
-                    .keyboardShortcut("t", modifiers: [.command, .shift])
             }
         }
     }

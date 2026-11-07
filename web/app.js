@@ -2,7 +2,7 @@
 // předvolby, vyhledávání, ovládání ze zamčené obrazovky a automatické obnovení spojení.
 "use strict";
 
-const SLOTS = 10;
+const BASE = 10; // prvních 10 míst je vždy vidět (klávesy 1–0), další přibývají bez omezení
 const DEFAULTS = [
   { name: "BBC Radio 6 Music", country: "Velká Británie", codec: "AAC", bitrate: 96,
     url: "https://as-hls-ww-live.akamaized.net/pool_81827798/live/ww/bbc_6music/bbc_6music.isml/bbc_6music-audio%3d96000.norewind.m3u8" },
@@ -27,7 +27,7 @@ const withId = s => s ? { ...s, id: s.id || uid() } : null;
 
 let presets = store.get("vlnka.presets.v1", null);
 if (!Array.isArray(presets)) presets = DEFAULTS.map(withId);
-presets = Array.from({ length: SLOTS }, (_, i) => withId(presets[i] || null));
+presets = Array.from({ length: Math.max(BASE, presets.length) }, (_, i) => withId(presets[i] || null));
 const savePresets = () => store.set("vlnka.presets.v1", presets);
 savePresets();
 
@@ -217,7 +217,8 @@ function render() {
   $("playIcon").className = "ico " + (isActive() ? "ico-pause" : "ico-play");
   $("playLabel").textContent = isActive() ? "Pozastavit" : "Přehrát";
   $("stopBtn").disabled = S.state === "stopped";
-  $("savedCount").textContent = `${presets.filter(Boolean).length} z ${SLOTS} uložených`;
+  const n = presets.filter(Boolean).length;
+  $("savedCount").textContent = n === 1 ? "1 uložená" : n > 1 && n < 5 ? `${n} uložené` : `${n} uložených`;
   document.title = c && isActive() ? `${c.name} · Vlnka` : "Vlnka";
   renderGrid();
   updateMediaSession();
@@ -232,13 +233,16 @@ function el(tag, cls, text) {
 
 function renderGrid() {
   const grid = $("grid");
-  grid.replaceChildren(...presets.map((st, i) => {
+  const shown = presets.includes(null) ? presets : [...presets, null]; // nic volného → „Přidat předvolbu“
+  grid.replaceChildren(...shown.map((st, i) => {
+    const extra = i >= presets.length;
     const active = st && st.id === S.current?.id && S.state !== "stopped";
     const cell = el("div", "cell" + (st ? "" : " empty") + (active ? " active" : ""));
     cell.tabIndex = 0;
     cell.setAttribute("role", "button");
     const txt = el("div", "txt");
-    txt.append(el("div", "nm", st ? st.name : "Volné místo"), el("div", "sb", st ? subtitle(st) : "Klikněte a vyberte stanici"));
+    txt.append(el("div", "nm", st ? st.name : extra ? "Přidat předvolbu" : "Volné místo"),
+      el("div", "sb", st ? subtitle(st) : extra ? "Další místo pro stanici" : "Klikněte a vyberte stanici"));
     cell.append(txt);
     if (st) {
       const more = el("button", "more");
@@ -250,7 +254,7 @@ function renderGrid() {
     const act = () => st ? play(st) : openSearch(i);
     cell.addEventListener("click", act);
     cell.addEventListener("keydown", e => { if (e.key === "Enter") act(); });
-    cell.title = st ? `Klávesa ${(i + 1) % 10}` : "Vybrat stanici";
+    cell.title = st ? (i < 10 ? `Klávesa ${(i + 1) % 10}` : "") : "Vybrat stanici";
     return cell;
   }));
 }
@@ -264,9 +268,9 @@ function openMenu(i, anchor) {
     ["Nahradit jinou stanicí…", () => openSearch(i)],
     "-",
     ["Posunout dříve", () => move(i, -1), i === 0],
-    ["Posunout později", () => move(i, 1), i === SLOTS - 1],
+    ["Posunout později", () => move(i, 1), i >= presets.length - 1],
     "-",
-    ["Odebrat", () => { presets[i] = null; savePresets(); render(); }, false, "danger"],
+    ["Odebrat", () => { if (i >= BASE) presets.splice(i, 1); else presets[i] = null; savePresets(); render(); }, false, "danger"],
   ];
   menu.replaceChildren(...items.map(it => {
     if (it === "-") return el("hr");
@@ -287,7 +291,8 @@ function move(i, d) { const j = i + d; [presets[i], presets[j]] = [presets[j], p
 // ---------- vyhledávání ----------
 const searchDlg = $("searchDlg");
 let searchSlot = null, mode = "tag", lastQuery = "";
-const targetSlot = () => searchSlot ?? presets.findIndex(p => !p);
+const targetSlot = () => { if (searchSlot != null) return searchSlot; const i = presets.indexOf(null); return i < 0 ? presets.length : i; };
+const setPreset = (i, st) => { presets[i] = st; for (let k = 0; k < presets.length; k++) if (presets[k] === undefined) presets[k] = null; };
 
 function openSearch(slot = null) {
   searchSlot = slot;
@@ -334,7 +339,7 @@ async function search() {
       if (t < 0) sv.title = "Všechny předvolby jsou obsazené – nějakou odeberte.";
       sv.addEventListener("click", () => {
         const slot = targetSlot(); if (slot < 0) return;
-        presets[slot] = withId({ ...st, id: null }); savePresets(); render();
+        setPreset(slot, withId({ ...st, id: null })); savePresets(); render();
         if (searchSlot != null) searchDlg.close(); else { updateTargetNote(); search(); }
       });
       row.append(txt, pb, sv);
@@ -367,7 +372,7 @@ const fromForm = () => ({
   country: form.elements.country.value.trim(), codec: form.elements.codec.value.trim(),
   bitrate: parseInt(form.elements.bitrate.value, 10) || 0,
 });
-form.addEventListener("submit", e => { e.preventDefault(); if (!form.reportValidity()) return; presets[editSlot] = fromForm(); savePresets(); editDlg.close(); render(); });
+form.addEventListener("submit", e => { e.preventDefault(); if (!form.reportValidity()) return; setPreset(editSlot, fromForm()); savePresets(); editDlg.close(); render(); });
 $("editCancel").addEventListener("click", () => editDlg.close());
 $("editTry").addEventListener("click", () => { if (form.reportValidity()) play(fromForm()); });
 for (const d of [searchDlg, editDlg]) d.addEventListener("click", e => { if (e.target === d) d.close(); });
