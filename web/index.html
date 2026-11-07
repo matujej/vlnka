@@ -1,0 +1,115 @@
+<!doctype html>
+<html lang="cs">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Vlnka</title>
+<meta name="description" content="Vlnka – lehké internetové rádio">
+<meta name="theme-color" content="#F4F3EF" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#1E1E1C" media="(prefers-color-scheme: dark)">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="Vlnka">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icons/icon-192.png" type="image/png">
+<link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="app">
+  <header class="masthead">
+    <div class="glyph glyph-40" aria-hidden="true"></div>
+    <div>
+      <h1>Vlnka</h1>
+      <p class="muted">Rádio do dílny</p>
+    </div>
+  </header>
+
+  <section class="card now" aria-live="polite">
+    <div class="now-head">
+      <span class="eyebrow">Právě hraje</span>
+      <span class="status"><i id="statusDot"></i><span id="statusText">Zastaveno</span></span>
+    </div>
+    <div class="now-body">
+      <div class="glyph glyph-52" aria-hidden="true"></div>
+      <div class="now-text">
+        <div id="stationName" class="station-name">Zatím ticho</div>
+        <div id="trackLine" class="track"></div>
+        <div id="stationSub" class="muted small">Vyberte si stanici z předvoleb.</div>
+      </div>
+    </div>
+    <div class="controls">
+      <button id="playBtn" class="btn btn-olive" type="button"><span id="playIcon" class="ico ico-play"></span><span id="playLabel">Přehrát</span></button>
+      <button id="stopBtn" class="btn btn-outline btn-icon" type="button" aria-label="Zastavit" title="Zastavit"><span class="ico ico-stop"></span></button>
+      <label class="volume" id="volumeWrap" title="Hlasitost">
+        <span class="ico ico-speaker" aria-hidden="true"></span>
+        <input id="volume" type="range" min="0" max="1" step="0.01" aria-label="Hlasitost">
+      </label>
+    </div>
+  </section>
+
+  <section class="presets">
+    <div class="section-head">
+      <h2>Předvolby</h2>
+      <span id="savedCount" class="muted small"></span>
+    </div>
+    <div id="grid" class="grid"></div>
+    <button id="searchBtn" class="btn btn-outline btn-wide" type="button"><span class="ico ico-search"></span>Vyhledat další stanici</button>
+  </section>
+
+  <p class="muted small foot">Předvolby zůstávají uložené v tomto zařízení.</p>
+</main>
+
+<!-- Nabídka předvolby -->
+<div id="menu" class="menu" role="menu" hidden></div>
+
+<!-- Vyhledávání -->
+<dialog id="searchDlg" class="sheet">
+  <form method="dialog" class="sheet-inner" id="searchForm">
+    <div class="sheet-head">
+      <div><h3 id="searchTitle">Vyhledat stanici</h3><div id="targetNote" class="muted tiny"></div></div>
+      <button class="link" value="close" type="submit">Hotovo</button>
+    </div>
+    <div class="search-row">
+      <div class="seg" role="radiogroup" aria-label="Hledat podle">
+        <button type="button" data-mode="tag" class="on">Žánr</button>
+        <button type="button" data-mode="name">Název</button>
+      </div>
+      <input id="query" type="search" placeholder="lounge, indie, jazz…" autocomplete="off" enterkeyhint="search">
+    </div>
+    <div id="results" class="results"></div>
+    <div class="sheet-foot">
+      <button type="button" id="customBtn" class="link">Vlastní adresa streamu…</button>
+      <span class="muted tiny">Zdroj: radio-browser.info</span>
+    </div>
+  </form>
+</dialog>
+
+<!-- Úprava předvolby -->
+<dialog id="editDlg" class="sheet">
+  <form class="sheet-inner" id="editForm">
+    <div class="sheet-head">
+      <h3 id="editTitle">Předvolba</h3>
+    </div>
+    <label class="field"><span>Název</span><input name="name" required></label>
+    <label class="field"><span>Adresa streamu</span><input name="url" type="url" placeholder="https://…" required></label>
+    <label class="field"><span>Země</span><input name="country"></label>
+    <div class="field-row">
+      <label class="field"><span>Formát</span><input name="codec" placeholder="MP3 / AAC"></label>
+      <label class="field"><span>kb/s</span><input name="bitrate" inputmode="numeric"></label>
+    </div>
+    <p class="muted tiny">Na webu hrají jen streamy s adresou https://.</p>
+    <div class="sheet-actions">
+      <button type="button" class="btn btn-outline" id="editTry">Vyzkoušet</button>
+      <span class="spacer"></span>
+      <button type="button" class="link" id="editCancel">Zrušit</button>
+      <button type="submit" class="btn btn-olive">Uložit</button>
+    </div>
+  </form>
+</dialog>
+
+<audio id="audio" preload="none" playsinline></audio>
+<script src="app.js"></script>
+</body>
+</html>

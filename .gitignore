@@ -1,0 +1,6 @@
+build/
+Tools/.team
+.DS_Store
+.claude/
+xcuserdata/
+*.xcuserstate
