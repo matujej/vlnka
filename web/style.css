@@ -178,3 +178,19 @@ input:focus { border-color: var(--olive); box-shadow: 0 0 0 3px color-mix(in srg
 .field input { color: var(--ink); }
 .field-row { display: flex; gap: 10px; }
 .field-row .field:last-child { flex: 0 0 110px; }
+
+/* Archiv FM4 v kartě Právě hraje */
+.archive { border-top: 1px solid var(--stroke); padding-top: 10px; display: flex; flex-direction: column; gap: 6px; }
+.archive[hidden], .progress[hidden] { display: none; }
+.progress input { width: 100%; accent-color: var(--button); margin: 0; }
+.times { display: flex; justify-content: space-between; font-variant-numeric: tabular-nums; }
+#archiveRows { display: flex; flex-direction: column; gap: 2px; }
+.arow { display: flex; align-items: center; gap: 10px; width: 100%; background: none; border: 0; border-radius: 8px; padding: 7px 10px; cursor: pointer; text-align: left; }
+.arow:hover { background: color-mix(in srgb, var(--chip) 45%, var(--card)); }
+.arow.active { background: var(--olive-soft); }
+.arow > .ico { color: var(--olive); width: 13px; height: 13px; margin: 0 3px; }
+.arow .txt { display: flex; flex-direction: column; min-width: 0; }
+.arow .nm { font-weight: 600; font-size: 14.5px; }
+.arow .sb { color: var(--muted); font-size: 12px; }
+.anote { padding: 4px 10px; }
+.link.small { font-size: 12.5px; padding: 0; }

@@ -47,6 +47,13 @@
         <input id="volume" type="range" min="0" max="1" step="0.01" aria-label="Hlasitost">
       </label>
     </div>
+    <div id="archive" class="archive" hidden>
+      <div id="archiveProgress" class="progress" hidden>
+        <input id="seek" type="range" min="0" step="1" value="0" aria-label="Pozice v epizodě">
+        <div class="times muted tiny"><span id="seekNow">0:00:00</span><span id="seekEnd">0:00:00</span></div>
+      </div>
+      <div id="archiveRows"></div>
+    </div>
   </section>
 
   <section class="presets">

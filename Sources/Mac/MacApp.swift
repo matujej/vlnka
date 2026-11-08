@@ -5,7 +5,7 @@ import AppKit
 
 struct ContentView: View {
     @EnvironmentObject var m: RadioModel
-    @State private var window: NSWindow?
+    @State var window: NSWindow?
 
     var body: some View {
         Group {
@@ -20,6 +20,9 @@ struct ContentView: View {
             w?.backgroundColor = NSColor(Theme.bg)
         })
         .onChange(of: m.pinned) { _, pinned in window?.level = pinned ? .floating : .normal }
+        .onChange(of: m.mini) { _, _ in keepOnScreen() }
+        .onChange(of: m.current) { _, _ in keepOnScreen() }
+        .onChange(of: m.episode) { _, _ in keepOnScreen() }
         .sheet(item: $m.sheet) { kind in
             Group {
                 switch kind {
@@ -32,6 +35,18 @@ struct ContentView: View {
             .tint(Theme.olive)
         }
         .tint(Theme.olive)
+    }
+}
+
+extension ContentView {
+    /// Když okno po zvětšení přeteče přes spodní kraj displeje, posune se nahoru (jen tolik, kolik je třeba).
+    func keepOnScreen() {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+            guard let w = window, let vis = w.screen?.visibleFrame, w.frame.minY < vis.minY else { return }
+            var o = w.frame.origin
+            o.y = min(vis.minY, vis.maxY - w.frame.height)
+            w.setFrameOrigin(o)
+        }
     }
 }
 

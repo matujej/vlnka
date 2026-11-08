@@ -54,6 +54,62 @@ enum DefaultStations {
     ]
 }
 
+/// Epizoda z archivu FM4 (ORF ji nabízí 7 dní po odvysílání).
+struct Episode: Identifiable, Hashable {
+    var id: String { url }
+    let show: String
+    let start: Date
+    let duration: Double
+    let url: String
+
+    var dateText: String {
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "cs_CZ")
+        f.dateFormat = "EEEEEE d. M."
+        return f.string(from: start)
+    }
+    var lengthText: String {
+        let m = Int((duration / 60).rounded())
+        return m >= 60 ? (m % 60 == 0 ? "\(m / 60) h" : "\(m / 60) h \(m % 60) min") : "\(m) min"
+    }
+}
+
+enum FM4Archive {
+    /// Pořady nabízené v archivu (klíč pořadu v audioapi.orf.at).
+    static let shows = ["4DD", "4GP"]
+
+    static func isFM4(_ s: Station?) -> Bool { s?.url.contains("orf-live.ors-shoutcast.at/fm4") == true }
+
+    private struct Day: Decodable { let broadcasts: [Broadcast] }
+    private struct Broadcast: Decodable {
+        let programKey: String; let title: String; let end: Double; let isOnDemand: Bool?; let href: String
+    }
+    private struct Detail: Decodable { let streams: [Stream] }
+    private struct Stream: Decodable { let loopStreamId: String; let start: Double; let end: Double }
+
+    /// Poslední dostupná epizoda každého pořadu.
+    static func latest() async throws -> [Episode] {
+        let url = URL(string: "https://audioapi.orf.at/fm4/api/json/current/broadcasts")!
+        let (data, _) = try await URLSession.shared.data(from: url)
+        let days = try JSONDecoder().decode([Day].self, from: data)
+        let now = Date().timeIntervalSince1970 * 1000
+        let all = days.flatMap(\.broadcasts).filter { $0.isOnDemand == true && $0.end < now }
+        var out: [Episode] = []
+        for key in shows {
+            guard let b = all.filter({ $0.programKey == key }).max(by: { $0.end < $1.end }),
+                  let href = URL(string: b.href) else { continue }
+            let (d, _) = try await URLSession.shared.data(from: href)
+            guard let st = try JSONDecoder().decode(Detail.self, from: d).streams.first,
+                  let id = st.loopStreamId.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) else { continue }
+            out.append(Episode(show: b.title.trimmingCharacters(in: .whitespaces),
+                               start: Date(timeIntervalSince1970: st.start / 1000),
+                               duration: (st.end - st.start) / 1000,
+                               url: "https://loopstream01.apa.at/?channel=fm4&shoutcast=0&id=\(id)"))
+        }
+        return out
+    }
+}
+
 enum PlayState { case stopped, loading, playing, paused, error, reconnecting }
 
 enum SheetKind: Identifiable {
@@ -85,6 +141,14 @@ final class RadioModel: NSObject, ObservableObject, AVPlayerItemMetadataOutputPu
     @Published var pinned = false
     @Published var mini = false
     @Published var sheet: SheetKind?
+
+    @Published private(set) var episode: Episode?
+    @Published private(set) var position: Double = 0
+    @Published private(set) var archive: [Episode] = []
+    @Published private(set) var archiveState: ArchiveLoad = .idle
+    enum ArchiveLoad { case idle, loading, loaded, failed }
+    private var archiveLoadedAt = Date.distantPast
+    private var resumeAt: Double = 0
 
     private let player = AVPlayer()
     private var statusObs: NSKeyValueObservation?
@@ -123,6 +187,10 @@ final class RadioModel: NSObject, ObservableObject, AVPlayerItemMetadataOutputPu
         }
         setupRemoteCommands()
         setupAutoReconnect()
+        player.addPeriodicTimeObserver(forInterval: CMTime(seconds: 1, preferredTimescale: 1), queue: .main) { [weak self] t in
+            guard let self, self.episode != nil, t.seconds.isFinite, self.resumeAt == 0 else { return }
+            self.position = t.seconds
+        }
         #if os(iOS)
         player.volume = 1
         try? AVAudioSession.sharedInstance().setCategory(.playback, mode: .default, policy: .longFormAudio)
@@ -153,6 +221,8 @@ final class RadioModel: NSObject, ObservableObject, AVPlayerItemMetadataOutputPu
     var trackLine: String {
         if state == .reconnecting { return online ? "Obnovuji spojení…" : "Čekám na připojení k internetu…" }
         if state == .error { return "Stream se nepodařilo načíst" }
+        if state == .stopped { return "" }
+        if let e = episode { return "\(e.show) · \(e.dateText)" }
         if !nowPlaying.isEmpty { return nowPlaying }
         return current == nil ? "" : "Živé vysílání"
     }
@@ -162,11 +232,48 @@ final class RadioModel: NSObject, ObservableObject, AVPlayerItemMetadataOutputPu
     func play(_ station: Station) {
         retryCount = 0
         isReconnecting = false
+        episode = nil
+        position = 0
+        resumeAt = 0
         start(station)
+        loadArchiveIfNeeded()
+    }
+
+    /// Pustí epizodu z archivu; stanice zůstává vybraná (FM4).
+    func playEpisode(_ e: Episode) {
+        guard let c = current else { return }
+        retryCount = 0
+        isReconnecting = false
+        episode = e
+        position = 0
+        resumeAt = 0
+        start(c)
+    }
+
+    func seek(to seconds: Double) {
+        guard episode != nil else { return }
+        position = seconds
+        player.seek(to: CMTime(seconds: seconds, preferredTimescale: 1))
+        updateNowPlayingInfo()
+    }
+
+    func loadArchiveIfNeeded(force: Bool = false) {
+        guard FM4Archive.isFM4(current), archiveState != .loading else { return }
+        guard force || archiveState != .loaded || Date().timeIntervalSince(archiveLoadedAt) > 3600 else { return }
+        archiveState = .loading
+        Task { @MainActor in
+            do {
+                self.archive = try await FM4Archive.latest()
+                self.archiveLoadedAt = Date()
+                self.archiveState = .loaded
+            } catch {
+                self.archiveState = .failed
+            }
+        }
     }
 
     private func start(_ station: Station, keepMeta: Bool = false) {
-        guard let url = URL(string: station.url) else { return }
+        guard let url = URL(string: episode?.url ?? station.url) else { return }
         wantsPlaying = true
         lastAttempt = Date()
         notPlayingSince = Date()
@@ -182,7 +289,13 @@ final class RadioModel: NSObject, ObservableObject, AVPlayerItemMetadataOutputPu
         item.add(meta)
         itemObs = item.observe(\.status, options: [.new]) { [weak self] item, _ in
             DispatchQueue.main.async {
-                if item.status == .failed { self?.syncState() }
+                guard let self else { return }
+                if item.status == .readyToPlay, self.resumeAt > 0 {
+                    // po výpadku pokračovat v epizodě tam, kde přestala
+                    self.player.seek(to: CMTime(seconds: self.resumeAt, preferredTimescale: 1))
+                    self.resumeAt = 0
+                }
+                if item.status == .failed { self.syncState() }
             }
         }
         player.replaceCurrentItem(with: item)
@@ -198,12 +311,31 @@ final class RadioModel: NSObject, ObservableObject, AVPlayerItemMetadataOutputPu
             player.pause()
             state = .paused
             updateNowPlayingInfo()
+        } else if episode != nil, player.currentItem != nil, player.currentItem?.status != .failed {
+            // epizoda pokračuje tam, kde se pozastavila
+            wantsPlaying = true
+            notPlayingSince = Date()
+            player.play()
+        } else if let e = episode {
+            retryCount = 0
+            resumeAt = position
+            playEpisodeKeepingPosition(e)
         } else if let c = current ?? presets.compactMap({ $0 }).first {
             play(c) // u živého vysílání se po pauze napojíme znovu na aktuální čas
         }
     }
 
+    private func playEpisodeKeepingPosition(_ e: Episode) {
+        guard let c = current else { return }
+        isReconnecting = false
+        episode = e
+        start(c)
+    }
+
     func stop() {
+        episode = nil
+        position = 0
+        resumeAt = 0
         manualStop = true
         wantsPlaying = false
         isReconnecting = false
@@ -271,6 +403,11 @@ final class RadioModel: NSObject, ObservableObject, AVPlayerItemMetadataOutputPu
                      AVPlayerItem.didPlayToEndTimeNotification] {
             nc.addObserver(forName: name, object: nil, queue: .main) { [weak self] note in
                 guard let self, note.object as? AVPlayerItem === self.player.currentItem, self.wantsPlaying else { return }
+                if note.name == AVPlayerItem.didPlayToEndTimeNotification, let e = self.episode,
+                   self.position >= e.duration - 30 {
+                    self.stop() // epizoda dohrála
+                    return
+                }
                 // krátké zaseknutí AVPlayer často zvládne sám (řeší hlídač po 8 s);
                 // chyba nebo ukončení streamu serverem = obnovit hned
                 if note.name != AVPlayerItem.playbackStalledNotification { self.isReconnecting = true }
@@ -294,8 +431,20 @@ final class RadioModel: NSObject, ObservableObject, AVPlayerItemMetadataOutputPu
 
     private func reconnect() {
         guard let c = current, wantsPlaying else { return }
+        if episode != nil, retryCount >= 4 {
+            // epizoda mohla z archivu zmizet (po 7 dnech): netočit se donekonečna
+            wantsPlaying = false
+            isReconnecting = false
+            player.pause()
+            archiveState = .idle
+            loadArchiveIfNeeded()
+            state = .error
+            updateNowPlayingInfo()
+            return
+        }
         retryCount += 1
         isReconnecting = true
+        if episode != nil { resumeAt = position }
         start(c, keepMeta: true)
     }
 
@@ -342,6 +491,7 @@ final class RadioModel: NSObject, ObservableObject, AVPlayerItemMetadataOutputPu
     func metadataOutput(_ output: AVPlayerItemMetadataOutput,
                         didOutputTimedMetadataGroups groups: [AVTimedMetadataGroup],
                         from track: AVPlayerItemTrack?) {
+        guard episode == nil else { return }
         let items = groups.flatMap(\.items)
         Task { @MainActor in
             for item in items {
@@ -379,6 +529,11 @@ final class RadioModel: NSObject, ObservableObject, AVPlayerItemMetadataOutputPu
         c.stopCommand.addTarget { [weak self] _ in self?.stop(); return .success }
         c.nextTrackCommand.addTarget { [weak self] _ in self?.step(1); return .success }
         c.previousTrackCommand.addTarget { [weak self] _ in self?.step(-1); return .success }
+        c.changePlaybackPositionCommand.addTarget { [weak self] ev in
+            guard let self, self.episode != nil, let e = ev as? MPChangePlaybackPositionCommandEvent else { return .commandFailed }
+            self.seek(to: e.positionTime)
+            return .success
+        }
     }
 
     private func updateNowPlayingInfo() {
@@ -390,12 +545,18 @@ final class RadioModel: NSObject, ObservableObject, AVPlayerItemMetadataOutputPu
             #endif
             return
         }
-        center.nowPlayingInfo = [
-            MPMediaItemPropertyTitle: nowPlaying.isEmpty ? c.name : nowPlaying,
+        var info: [String: Any] = [
+            MPMediaItemPropertyTitle: episode?.show ?? (nowPlaying.isEmpty ? c.name : nowPlaying),
             MPMediaItemPropertyArtist: c.name,
-            MPNowPlayingInfoPropertyIsLiveStream: true,
+            MPNowPlayingInfoPropertyIsLiveStream: episode == nil,
             MPNowPlayingInfoPropertyPlaybackRate: state == .playing ? 1.0 : 0.0,
         ]
+        if let e = episode {
+            info[MPMediaItemPropertyPlaybackDuration] = e.duration
+            info[MPNowPlayingInfoPropertyElapsedPlaybackTime] = position
+        }
+        center.nowPlayingInfo = info
+        MPRemoteCommandCenter.shared().changePlaybackPositionCommand.isEnabled = episode != nil
         #if os(macOS)
         center.playbackState = isActive ? .playing : .paused
         #endif
@@ -544,10 +705,11 @@ extension PlayState {
 
 struct StatusLine: View {
     let state: PlayState
+    var playingLabel: String? = nil
     var body: some View {
         HStack(spacing: 6) {
             Circle().fill(state.color).frame(width: 6, height: 6)
-            Text(state.label).font(.ui(13, italic: true)).foregroundStyle(Theme.muted)
+            Text(state == .playing ? (playingLabel ?? state.label) : state.label).font(.ui(13, italic: true)).foregroundStyle(Theme.muted)
         }
     }
 }
@@ -559,7 +721,7 @@ struct NowPlayingCard: View {
             HStack(alignment: .firstTextBaseline) {
                 Text("Právě hraje").font(.ui(13, bold: true)).foregroundStyle(Theme.olive)
                 Spacer()
-                StatusLine(state: m.state)
+                StatusLine(state: m.state, playingLabel: m.episode != nil ? "Z archivu" : nil)
             }
             HStack(spacing: 14) {
                 StationGlyph(size: 52)
@@ -604,9 +766,88 @@ struct NowPlayingCard: View {
                 AirPlayButton().frame(width: 38, height: 38) // hlasitost řeší tlačítka telefonu
                 #endif
             }
+            if FM4Archive.isFM4(m.current) { ArchivePanel() }
         }
         .padding(16)
         .card()
+    }
+}
+
+/// Rozbalený výběr u FM4: živé vysílání a poslední epizody z archivu.
+struct ArchivePanel: View {
+    @EnvironmentObject var m: RadioModel
+    @State private var scrub: Double?
+
+    private func clock(_ t: Double) -> String {
+        let s = Int(max(0, t))
+        return String(format: "%d:%02d:%02d", s / 3600, s / 60 % 60, s % 60)
+    }
+
+    private func row(_ title: String, _ sub: String, active: Bool, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            HStack(spacing: 10) {
+                Image(systemName: active ? "speaker.wave.2.fill" : "play.fill")
+                    .font(.system(size: 12))
+                    .foregroundStyle(Theme.olive)
+                    .frame(width: 18)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(title).font(.ui(14, bold: true)).foregroundStyle(Theme.ink)
+                    Text(sub).font(.ui(12)).foregroundStyle(Theme.muted)
+                }
+                .lineLimit(1)
+                Spacer(minLength: 4)
+            }
+            .padding(.vertical, 7)
+            .padding(.horizontal, 10)
+            .background(RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .fill(active ? Theme.oliveSoft : .clear))
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Divider().padding(.bottom, 4)
+            if let e = m.episode {
+                VStack(spacing: 2) {
+                    Slider(value: Binding(get: { scrub ?? min(m.position, e.duration) }, set: { scrub = $0 }),
+                           in: 0...max(e.duration, 1),
+                           onEditingChanged: { editing in
+                               if !editing, let t = scrub { m.seek(to: t); scrub = nil }
+                           })
+                        .tint(Theme.button)
+                        .controlSize(.small)
+                    HStack {
+                        Text(clock(scrub ?? m.position))
+                        Spacer()
+                        Text(clock(e.duration))
+                    }
+                    .font(.ui(11).monospacedDigit())
+                    .foregroundStyle(Theme.muted)
+                }
+                .padding(.bottom, 4)
+            }
+            row("Živé vysílání", "FM4 právě teď", active: m.episode == nil && m.state != .stopped) {
+                if let c = m.current { m.play(c) }
+            }
+            ForEach(m.archive) { e in
+                row(e.show, "\(e.dateText) · \(e.lengthText)", active: m.episode == e) { m.playEpisode(e) }
+            }
+            switch m.archiveState {
+            case .loading where m.archive.isEmpty:
+                Text("Načítám archiv…").font(.ui(12)).foregroundStyle(Theme.muted).padding(.horizontal, 10)
+            case .failed:
+                HStack {
+                    Text("Archiv se nepodařilo načíst.").font(.ui(12)).foregroundStyle(Theme.muted)
+                    Button("Zkusit znovu") { m.loadArchiveIfNeeded(force: true) }
+                        .buttonStyle(.plain).font(.ui(12)).foregroundStyle(Theme.olive)
+                }
+                .padding(.horizontal, 10)
+            default:
+                EmptyView()
+            }
+        }
     }
 }
 
@@ -628,10 +869,15 @@ struct PresetsSection: View {
             }
             #if os(macOS)
             // na Macu se okno nenafukuje: víc než 6 řad se posouvá
+            // na výšku displeje: okno nikdy nepřeroste obrazovku (i s rozbaleným archivem)
             let rows = (m.displayedSlots + 1) / 2
-            if rows > 6 {
+            let natural = CGFloat(rows) * 66 - 10
+            let chrome: CGFloat = FM4Archive.isFM4(m.current) ? (m.episode != nil ? 640 : 600) : 410
+            let screen = NSScreen.main?.visibleFrame.height ?? 900
+            let room = max(130, min(5 * 66 + 34, screen - chrome))
+            if rows > 6 || natural > room {
                 ScrollView { grid.padding(.trailing, 2) }
-                    .frame(height: 5 * 66 + 34) // poslední řada napůl vykukuje = jde posouvat
+                    .frame(height: room)
             } else { grid }
             #else
             grid

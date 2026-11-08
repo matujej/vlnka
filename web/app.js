@@ -34,6 +34,7 @@ savePresets();
 // ---------- stav ----------
 const S = {
   current: null, state: "stopped", track: "",
+  episode: null, resumeAt: 0, archive: [], archiveState: "idle", archiveAt: 0, scrubbing: false,
   wantsPlaying: false, reconnecting: false, online: navigator.onLine,
   notPlayingSince: null, lastAttempt: 0, retry: 0,
 };
@@ -76,6 +77,94 @@ async function attach(url) {
 }
 
 let startToken = 0;
+// ---------- archiv FM4 (ORF nabízí epizody 7 dní) ----------
+const SHOWS = ["4DD", "4GP"]; // Davidecks, Worldwide Show
+const isFM4 = st => !!st && st.url.includes("orf-live.ors-shoutcast.at/fm4");
+const dateText = ms => {
+  const d = new Date(ms);
+  return `${["ne", "po", "út", "st", "čt", "pá", "so"][d.getDay()]} ${d.getDate()}. ${d.getMonth() + 1}.`;
+};
+const lengthText = sec => {
+  const m = Math.round(sec / 60);
+  return m >= 60 ? (m % 60 ? `${Math.floor(m / 60)} h ${m % 60} min` : `${m / 60} h`) : `${m} min`;
+};
+const clock = t => {
+  const s = Math.max(0, Math.floor(t || 0));
+  return `${Math.floor(s / 3600)}:${String(Math.floor(s / 60) % 60).padStart(2, "0")}:${String(s % 60).padStart(2, "0")}`;
+};
+
+async function loadArchive(force = false) {
+  if (!isFM4(S.current) || S.archiveState === "loading") return;
+  if (!force && S.archiveState === "loaded" && Date.now() - S.archiveAt < 3600000) return;
+  S.archiveState = "loading"; renderArchive();
+  try {
+    const days = await (await fetch("https://audioapi.orf.at/fm4/api/json/current/broadcasts")).json();
+    const now = Date.now();
+    const all = days.flatMap(d => d.broadcasts).filter(b => b.isOnDemand && b.end < now);
+    const out = [];
+    for (const key of SHOWS) {
+      const b = all.filter(x => x.programKey === key).sort((a, c) => c.end - a.end)[0];
+      if (!b) continue;
+      const st = (await (await fetch(b.href)).json()).streams?.[0];
+      if (!st) continue;
+      out.push({ show: b.title.trim(), start: st.start, duration: (st.end - st.start) / 1000,
+                 url: `https://loopstream01.apa.at/?channel=fm4&shoutcast=0&id=${encodeURIComponent(st.loopStreamId)}` });
+    }
+    S.archive = out; S.archiveAt = Date.now(); S.archiveState = "loaded";
+  } catch { S.archiveState = "failed"; }
+  renderArchive();
+}
+
+function playEpisode(e) {
+  if (!S.current) return;
+  S.retry = 0; S.reconnecting = false;
+  S.episode = e; S.resumeAt = 0;
+  start(S.current);
+}
+function seekTo(t) {
+  if (!S.episode) return;
+  audio.currentTime = t;
+  updateProgress();
+}
+
+function renderArchive() {
+  const box = $("archive");
+  const show = isFM4(S.current);
+  box.hidden = !show;
+  if (!show) return;
+  $("archiveProgress").hidden = !S.episode;
+  const row = (title, sub, active, fn) => {
+    const b = el("button", "arow" + (active ? " active" : ""));
+    b.type = "button";
+    b.append(el("span", "ico " + (active ? "ico-speaker" : "ico-play")));
+    const t = el("span", "txt");
+    t.append(el("span", "nm", title), el("span", "sb", sub));
+    b.append(t);
+    b.addEventListener("click", fn);
+    return b;
+  };
+  const rows = [row("Živé vysílání", "FM4 právě teď", !S.episode && S.state !== "stopped", () => play(S.current))];
+  for (const e of S.archive) rows.push(row(e.show, `${dateText(e.start)} · ${lengthText(e.duration)}`, S.episode?.url === e.url, () => playEpisode(e)));
+  if (S.archiveState === "loading" && !S.archive.length) rows.push(el("div", "muted small anote", "Načítám archiv…"));
+  if (S.archiveState === "failed") {
+    const n = el("div", "muted small anote", "Archiv se nepodařilo načíst. ");
+    const again = el("button", "link small", "Zkusit znovu");
+    again.type = "button"; again.addEventListener("click", () => loadArchive(true));
+    n.append(again); rows.push(n);
+  }
+  $("archiveRows").replaceChildren(...rows);
+  updateProgress();
+}
+
+function updateProgress() {
+  if (!S.episode) return;
+  const seek = $("seek");
+  seek.max = S.episode.duration;
+  if (!S.scrubbing) seek.value = audio.currentTime || S.resumeAt || 0;
+  $("seekNow").textContent = clock(+seek.value);
+  $("seekEnd").textContent = clock(S.episode.duration);
+}
+
 async function start(st, keepTrack = false) {
   const token = ++startToken;
   S.current = st;
@@ -85,7 +174,7 @@ async function start(st, keepTrack = false) {
   if (!keepTrack) S.track = "";
   setState(S.reconnecting ? "reconnecting" : "loading");
   try {
-    await attach(st.url);
+    await attach(S.episode ? S.episode.url : st.url);
     await audio.play();
   } catch (e) {
     // starší pokus přerušený novějším (přepnutí stanice, nové napojení) – nic se nerozbilo
@@ -96,7 +185,11 @@ async function start(st, keepTrack = false) {
   fetchNowPlaying();
 }
 
-function play(st) { S.retry = 0; S.reconnecting = false; start(st); }
+function play(st) {
+  S.retry = 0; S.reconnecting = false; S.episode = null; S.resumeAt = 0;
+  start(st);
+  loadArchive();
+}
 
 function pause() {
   S.wantsPlaying = false; S.reconnecting = false;
@@ -109,12 +202,16 @@ function stop() {
   audio.pause();
   if (hls) { hls.destroy(); hls = null; }
   audio.removeAttribute("src"); audio.load();
-  S.track = "";
+  S.track = ""; S.episode = null; S.resumeAt = 0;
   setState("stopped");
 }
 
 function toggle() {
   if (isActive()) pause();
+  else if (S.episode && !audio.error && audio.getAttribute("src")) {  // epizoda pokračuje, kde se pozastavila
+    S.wantsPlaying = true; S.notPlayingSince = Date.now();
+    audio.play().catch(markBroken);
+  } else if (S.episode) { S.retry = 0; S.resumeAt = S.resumeAt || 0; start(S.current); }
   else { const c = S.current || presets.find(Boolean); if (c) play(c); } // po pauze znovu na živé vysílání
 }
 
@@ -136,7 +233,14 @@ function markBroken() {
 }
 function reconnect() {
   if (!S.current || !S.wantsPlaying) return;
+  if (S.episode && S.retry >= 4) {      // epizoda mohla z archivu zmizet (po 7 dnech)
+    S.wantsPlaying = false; S.reconnecting = false; audio.pause();
+    S.archiveState = "idle"; loadArchive();
+    setState("error");
+    return;
+  }
   S.retry++; S.reconnecting = true;
+  if (S.episode && audio.currentTime > 0) S.resumeAt = audio.currentTime;
   start(S.current, true);
 }
 setInterval(() => {                    // hlídač: má hrát a 8 s nehraje → znovu (2, 4, 8 … max 30 s)
@@ -158,7 +262,15 @@ audio.addEventListener("waiting", () => {
 });
 audio.addEventListener("stalled", () => { if (!S.notPlayingSince) S.notPlayingSince = Date.now(); });
 audio.addEventListener("error", () => { if (audio.getAttribute("src") || hls) markBroken(); });
-audio.addEventListener("ended", () => markBroken());          // server stream ukončil
+audio.addEventListener("ended", () => {
+  if (S.episode && audio.currentTime >= S.episode.duration - 30) { stop(); return; } // epizoda dohrála
+  if (S.episode) S.resumeAt = audio.currentTime;
+  S.reconnecting = true; if (S.wantsPlaying) setState("reconnecting");     // server stream ukončil
+});
+audio.addEventListener("loadedmetadata", () => {             // po výpadku pokračovat v epizodě
+  if (S.episode && S.resumeAt > 0) { audio.currentTime = S.resumeAt; S.resumeAt = 0; }
+});
+audio.addEventListener("timeupdate", updateProgress);
 audio.addEventListener("pause", () => {                       // pauza z ovládání systému
   if (S.wantsPlaying && !audio.ended && audio.error == null && S.state === "playing") {
     S.wantsPlaying = false; setState("paused");
@@ -170,7 +282,7 @@ let npTimer = null;
 async function fetchNowPlaying() {
   clearTimeout(npTimer);
   const st = S.current;
-  if (!st || !st.np || !S.wantsPlaying) return;
+  if (!st || !st.np || !S.wantsPlaying || S.episode) return;
   let line = "";
   try {
     if (st.np === "kexp") {
@@ -201,6 +313,7 @@ function trackLine() {
   if (S.state === "reconnecting") return S.online ? "Obnovuji spojení…" : "Čekám na připojení k internetu…";
   if (S.state === "error") return "Stream se nepodařilo načíst";
   if (S.state === "stopped") return "";
+  if (S.episode) return `${S.episode.show} · ${dateText(S.episode.start)}`;
   if (S.track) return S.track;
   return S.current ? "Živé vysílání" : "";
 }
@@ -208,7 +321,7 @@ function trackLine() {
 function render() {
   const c = S.current;
   $("statusDot").className = S.state;
-  $("statusText").textContent = LABEL[S.state];
+  $("statusText").textContent = S.state === "playing" && S.episode ? "Z archivu" : LABEL[S.state];
   $("stationName").textContent = c ? c.name : "Zatím ticho";
   const tl = $("trackLine");
   tl.textContent = trackLine();
@@ -221,6 +334,7 @@ function render() {
   $("savedCount").textContent = n === 1 ? "1 uložená" : n > 1 && n < 5 ? `${n} uložené` : `${n} uložených`;
   document.title = c && isActive() ? `${c.name} · Vlnka` : "Vlnka";
   renderGrid();
+  renderArchive();
   updateMediaSession();
 }
 
@@ -381,6 +495,9 @@ for (const d of [searchDlg, editDlg]) d.addEventListener("click", e => { if (e.t
 $("playBtn").addEventListener("click", toggle);
 $("stopBtn").addEventListener("click", stop);
 $("searchBtn").addEventListener("click", () => openSearch(null));
+const seekEl = $("seek");
+seekEl.addEventListener("input", () => { S.scrubbing = true; $("seekNow").textContent = clock(+seekEl.value); });
+seekEl.addEventListener("change", () => { S.scrubbing = false; seekTo(+seekEl.value); });
 const vol = $("volume");
 vol.value = audio.volume = store.get("vlnka.volume", 0.8);
 vol.addEventListener("input", () => { audio.volume = +vol.value; store.set("vlnka.volume", +vol.value); });
@@ -399,7 +516,7 @@ function updateMediaSession() {
   if (!("mediaSession" in navigator)) return;
   const c = S.current;
   if (!c || S.state === "stopped") { navigator.mediaSession.metadata = null; navigator.mediaSession.playbackState = "none"; return; }
-  const title = S.track && !S.track.startsWith("Pořad:") ? S.track : c.name;
+  const title = S.episode ? S.episode.show : S.track && !S.track.startsWith("Pořad:") ? S.track : c.name;
   const m = navigator.mediaSession.metadata;
   if (!m || m.title !== title || m.artist !== c.name) {
     navigator.mediaSession.metadata = new MediaMetadata({
@@ -416,6 +533,7 @@ if ("mediaSession" in navigator) {
   h("stop", stop);
   h("nexttrack", () => step(1));
   h("previoustrack", () => step(-1));
+  h("seekto", d => { if (S.episode && d.seekTime != null) seekTo(d.seekTime); });
 }
 
 if ("serviceWorker" in navigator && location.protocol === "https:") {
