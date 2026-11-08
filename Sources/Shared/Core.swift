@@ -149,6 +149,10 @@ final class RadioModel: NSObject, ObservableObject, AVPlayerItemMetadataOutputPu
     enum ArchiveLoad { case idle, loading, loaded, failed }
     private var archiveLoadedAt = Date.distantPast
     private var resumeAt: Double = 0
+    /// Rozposlouchané epizody (adresa → sekundy); přežije přepnutí stanice i zavření aplikace.
+    @Published private(set) var progress: [String: Double] =
+        UserDefaults.standard.dictionary(forKey: "episodeProgress.v1") as? [String: Double] ?? [:]
+    private var lastProgressSave = Date.distantPast
 
     private let player = AVPlayer()
     private var statusObs: NSKeyValueObservation?
@@ -190,6 +194,7 @@ final class RadioModel: NSObject, ObservableObject, AVPlayerItemMetadataOutputPu
         player.addPeriodicTimeObserver(forInterval: CMTime(seconds: 1, preferredTimescale: 1), queue: .main) { [weak self] t in
             guard let self, self.episode != nil, t.seconds.isFinite, self.resumeAt == 0 else { return }
             self.position = t.seconds
+            if self.state == .playing, Date().timeIntervalSince(self.lastProgressSave) >= 5 { self.saveProgress() }
         }
         #if os(iOS)
         player.volume = 1
@@ -232,6 +237,7 @@ final class RadioModel: NSObject, ObservableObject, AVPlayerItemMetadataOutputPu
     func play(_ station: Station) {
         retryCount = 0
         isReconnecting = false
+        saveProgress()
         episode = nil
         position = 0
         resumeAt = 0
@@ -242,18 +248,32 @@ final class RadioModel: NSObject, ObservableObject, AVPlayerItemMetadataOutputPu
     /// Pustí epizodu z archivu; stanice zůstává vybraná (FM4).
     func playEpisode(_ e: Episode) {
         guard let c = current else { return }
+        if episode == e {          // stejná epizoda: nezačínat znovu, jen případně pokračovat
+            if !isActive { togglePlayPause() }
+            return
+        }
         retryCount = 0
         isReconnecting = false
+        saveProgress()
         episode = e
-        position = 0
-        resumeAt = 0
+        resumeAt = progress[e.url] ?? 0
+        position = resumeAt
         start(c)
+    }
+
+    /// Uloží pozici právě hrané epizody. Začátek a dohraný konec se nepamatují.
+    private func saveProgress() {
+        guard let e = episode, resumeAt == 0 else { return }
+        lastProgressSave = Date()
+        progress[e.url] = (position < 30 || position >= e.duration - 60) ? nil : position
+        UserDefaults.standard.set(progress, forKey: "episodeProgress.v1")
     }
 
     func seek(to seconds: Double) {
         guard episode != nil else { return }
         position = seconds
         player.seek(to: CMTime(seconds: seconds, preferredTimescale: 1))
+        saveProgress()
         updateNowPlayingInfo()
     }
 
@@ -264,6 +284,10 @@ final class RadioModel: NSObject, ObservableObject, AVPlayerItemMetadataOutputPu
         Task { @MainActor in
             do {
                 self.archive = try await FM4Archive.latest()
+                // pozice epizod, které už v archivu nejsou, nejsou potřeba
+                let live = Set(self.archive.map(\.url))
+                self.progress = self.progress.filter { live.contains($0.key) || $0.key == self.episode?.url }
+                UserDefaults.standard.set(self.progress, forKey: "episodeProgress.v1")
                 self.archiveLoadedAt = Date()
                 self.archiveState = .loaded
             } catch {
@@ -292,8 +316,9 @@ final class RadioModel: NSObject, ObservableObject, AVPlayerItemMetadataOutputPu
                 guard let self else { return }
                 if item.status == .readyToPlay, self.resumeAt > 0 {
                     // po výpadku pokračovat v epizodě tam, kde přestala
-                    self.player.seek(to: CMTime(seconds: self.resumeAt, preferredTimescale: 1))
-                    self.resumeAt = 0
+                    self.player.seek(to: CMTime(seconds: self.resumeAt, preferredTimescale: 1)) { _ in
+                        DispatchQueue.main.async { self.resumeAt = 0 } // do té doby pozici nepřepisovat nulou
+                    }
                 }
                 if item.status == .failed { self.syncState() }
             }
@@ -306,6 +331,7 @@ final class RadioModel: NSObject, ObservableObject, AVPlayerItemMetadataOutputPu
 
     func togglePlayPause() {
         if isActive {
+            saveProgress()
             wantsPlaying = false
             isReconnecting = false
             player.pause()
@@ -333,6 +359,7 @@ final class RadioModel: NSObject, ObservableObject, AVPlayerItemMetadataOutputPu
     }
 
     func stop() {
+        saveProgress()
         episode = nil
         position = 0
         resumeAt = 0
@@ -832,7 +859,10 @@ struct ArchivePanel: View {
                 if let c = m.current { m.play(c) }
             }
             ForEach(m.archive) { e in
-                row(e.show, "\(e.dateText) · \(e.lengthText)", active: m.episode == e) { m.playEpisode(e) }
+                row(e.show, m.episode != e && m.progress[e.url] != nil
+                        ? "\(e.dateText) · pokračovat od \(clock(m.progress[e.url]!))"
+                        : "\(e.dateText) · \(e.lengthText)",
+                    active: m.episode == e) { m.playEpisode(e) }
             }
             switch m.archiveState {
             case .loading where m.archive.isEmpty:

@@ -111,19 +111,38 @@ async function loadArchive(force = false) {
                  url: `https://loopstream01.apa.at/?channel=fm4&shoutcast=0&id=${encodeURIComponent(st.loopStreamId)}` });
     }
     S.archive = out; S.archiveAt = Date.now(); S.archiveState = "loaded";
+    // pozice epizod, které už v archivu nejsou, nejsou potřeba
+    for (const u of Object.keys(progress)) if (!out.some(x => x.url === u) && u !== S.episode?.url) delete progress[u];
+    store.set("vlnka.progress.v1", progress);
   } catch { S.archiveState = "failed"; }
   renderArchive();
 }
 
+// Rozposlouchané epizody (adresa → sekundy); přežije přepnutí stanice i zavření stránky.
+let progress = store.get("vlnka.progress.v1", {});
+let lastProgressSave = 0;
+function saveProgress() {
+  const e = S.episode;
+  if (!e || S.resumeAt > 0) return;
+  const t = audio.currentTime;
+  if (!(t >= 0)) return;
+  lastProgressSave = Date.now();
+  if (t < 30 || t >= e.duration - 60) delete progress[e.url]; else progress[e.url] = t;
+  store.set("vlnka.progress.v1", progress);
+}
+
 function playEpisode(e) {
   if (!S.current) return;
+  if (S.episode?.url === e.url) { if (!isActive()) toggle(); return; } // stejná epizoda: nezačínat znovu
   S.retry = 0; S.reconnecting = false;
-  S.episode = e; S.resumeAt = 0;
+  saveProgress();
+  S.episode = e; S.resumeAt = progress[e.url] || 0;
   start(S.current);
 }
 function seekTo(t) {
   if (!S.episode) return;
   audio.currentTime = t;
+  saveProgress();
   updateProgress();
 }
 
@@ -144,7 +163,10 @@ function renderArchive() {
     return b;
   };
   const rows = [row("Živé vysílání", "FM4 právě teď", !S.episode && S.state !== "stopped", () => play(S.current))];
-  for (const e of S.archive) rows.push(row(e.show, `${dateText(e.start)} · ${lengthText(e.duration)}`, S.episode?.url === e.url, () => playEpisode(e)));
+  for (const e of S.archive) {
+    const here = S.episode?.url === e.url, at = progress[e.url];
+    rows.push(row(e.show, `${dateText(e.start)} · ${!here && at ? `pokračovat od ${clock(at)}` : lengthText(e.duration)}`, here, () => playEpisode(e)));
+  }
   if (S.archiveState === "loading" && !S.archive.length) rows.push(el("div", "muted small anote", "Načítám archiv…"));
   if (S.archiveState === "failed") {
     const n = el("div", "muted small anote", "Archiv se nepodařilo načíst. ");
@@ -186,18 +208,21 @@ async function start(st, keepTrack = false) {
 }
 
 function play(st) {
+  saveProgress();
   S.retry = 0; S.reconnecting = false; S.episode = null; S.resumeAt = 0;
   start(st);
   loadArchive();
 }
 
 function pause() {
+  saveProgress();
   S.wantsPlaying = false; S.reconnecting = false;
   audio.pause();
   setState("paused");
 }
 
 function stop() {
+  saveProgress();
   S.wantsPlaying = false; S.reconnecting = false;
   audio.pause();
   if (hls) { hls.destroy(); hls = null; }
@@ -270,7 +295,10 @@ audio.addEventListener("ended", () => {
 audio.addEventListener("loadedmetadata", () => {             // po výpadku pokračovat v epizodě
   if (S.episode && S.resumeAt > 0) { audio.currentTime = S.resumeAt; S.resumeAt = 0; }
 });
-audio.addEventListener("timeupdate", updateProgress);
+audio.addEventListener("timeupdate", () => {
+  updateProgress();
+  if (S.state === "playing" && Date.now() - lastProgressSave >= 5000) saveProgress();
+});
 audio.addEventListener("pause", () => {                       // pauza z ovládání systému
   if (S.wantsPlaying && !audio.ended && audio.error == null && S.state === "playing") {
     S.wantsPlaying = false; setState("paused");
