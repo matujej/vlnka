@@ -134,7 +134,7 @@ struct MiniView: View {
         .card()
         .padding(.horizontal, 12)
         .padding(.bottom, 12)
-        .frame(width: 500)
+        .frame(width: 560) // stejná šířka jako velké okno, ať okno u kraje displeje neuskakuje
     }
 }
 
