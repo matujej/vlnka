@@ -346,7 +346,7 @@ final class RadioModel: NSObject, ObservableObject, AVPlayerItemMetadataOutputPu
         Task { @MainActor in
             for item in items {
                 if let s = try? await item.load(.stringValue) {
-                    let t = s.trimmingCharacters(in: .whitespacesAndNewlines)
+                    let t = cleanTrackTitle(s)
                     let low = t.lowercased()
                     let junk = ["preroll", "advert", "livestream", "commercial", "http"]
                     let isJunk = t.count < 3 || junk.contains { low.contains($0) }
@@ -400,6 +400,13 @@ final class RadioModel: NSObject, ObservableObject, AVPlayerItemMetadataOutputPu
         center.playbackState = isActive ? .playing : .paused
         #endif
     }
+}
+
+/// Název ze streamu bez osamělého oddělovače: „Duchovní hudba -“ → „Duchovní hudba“.
+/// Pomlčka bez mezery (např. kapela „-M-“) zůstává, je součástí jména.
+func cleanTrackTitle(_ raw: String) -> String {
+    raw.replacingOccurrences(of: #"^[\s\-–—]*[\-–—]\s+|\s+[\-–—][\s\-–—]*$"#, with: "", options: .regularExpression)
+        .trimmingCharacters(in: .whitespacesAndNewlines)
 }
 
 // MARK: - Vzhled
