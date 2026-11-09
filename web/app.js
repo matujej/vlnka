@@ -9,8 +9,8 @@ const DEFAULTS = [
   { name: "FM4", country: "Rakousko", codec: "MP3", bitrate: 192, url: "https://orf-live.ors-shoutcast.at/fm4-q2a", np: "fm4" },
   { name: "Lounge Radio", country: "Švýcarsko", codec: "MP3", bitrate: 128, url: "https://fr1.streamhosting.ch/lounge128.mp3" },
   { name: "Radio Paradise", country: "USA", codec: "AAC", bitrate: 128, url: "https://stream.radioparadise.com/aac-128" },
-  { name: "FIP", country: "Francie", codec: "AAC", bitrate: 192, url: "https://icecast.radiofrance.fr/fip-hifi.aac" },
-  { name: "FIP Groove", country: "Francie", codec: "AAC", bitrate: 192, url: "https://icecast.radiofrance.fr/fipgroove-hifi.aac" },
+  { name: "FIP", country: "Francie", codec: "AAC", bitrate: 192, url: "https://icecast.radiofrance.fr/fip-hifi.aac", np: "fip:7" },
+  { name: "FIP Groove", country: "Francie", codec: "AAC", bitrate: 192, url: "https://icecast.radiofrance.fr/fipgroove-hifi.aac", np: "fip:66" },
   { name: "KEXP 90.3 Seattle", country: "USA", codec: "AAC", bitrate: 160, url: "https://kexp.streamguys1.com/kexp160.aac", np: "kexp" },
   { name: "ČRo Radio Wave", country: "Česko", codec: "MP3", bitrate: 128, url: "https://rozhlas.stream/wave_mp3_128.mp3", np: "rozhlas:radiowave" },
   { name: "FluxFM", country: "Německo", codec: "MP3", bitrate: 320, url: "https://streams.fluxfm.de/live/mp3-320/audio/" },
@@ -28,6 +28,8 @@ const withId = s => s ? { ...s, id: s.id || uid() } : null;
 let presets = store.get("vlnka.presets.v1", null);
 if (!Array.isArray(presets)) presets = DEFAULTS.map(withId);
 presets = Array.from({ length: Math.max(BASE, presets.length) }, (_, i) => withId(presets[i] || null));
+// starší uložené předvolby: doplnit zdroj názvu skladby podle výchozích stanic
+for (const p of presets) { const d = p && DEFAULTS.find(x => x && x.url === p.url); if (d) p.np = d.np; }
 const savePresets = () => store.set("vlnka.presets.v1", presets);
 savePresets();
 
@@ -141,9 +143,20 @@ function playEpisode(e) {
 }
 function seekTo(t) {
   if (!S.episode) return;
+  t = Math.max(0, Math.min(t, S.episode.duration - 1));
   audio.currentTime = t;
   saveProgress();
   updateProgress();
+}
+
+const SKIP = 30;
+function skip(d) {                      // převinutí v epizodě o ±30 s
+  if (!S.episode) return;
+  if (S.resumeAt > 0) {                 // epizoda se teprve načítá: posunout místo, kde začne
+    S.resumeAt = Math.max(1, Math.min(S.resumeAt + d, S.episode.duration - 1));
+    updateProgress(); return;
+  }
+  seekTo(audio.currentTime + d);
 }
 
 function renderArchive() {
@@ -305,30 +318,86 @@ audio.addEventListener("pause", () => {                       // pauza z ovlád�
   }
 });
 
-// ---------- název skladby (jen stanice s veřejnými daty) ----------
-let npTimer = null;
+// ---------- název skladby ----------
+// Přednost má veřejné API stanice (KEXP, ČRo, FIP); jinak se čte z ICY metadat streamu,
+// pokud to server prohlížeči dovolí (CORS). Stanice, kde to nejde, se do zavření stránky nezkouší.
+const cleanTitle = t => String(t || "").replace(/^[\s\-–—]*[\-–—]\s+|\s+[\-–—][\s\-–—]*$/g, "").trim()
+  .replace(/\s+-\s+/, " – ");
+const JUNK = ["preroll", "advert", "livestream", "commercial", "http"];
+const noIcy = new Set();
+
+async function readIcy(url) {
+  const ac = new AbortController();
+  const t = setTimeout(() => ac.abort(), 10000);
+  try {
+    const r = await fetch(url, { headers: { "Icy-MetaData": "1" }, signal: ac.signal, cache: "no-store" });
+    const every = +r.headers.get("icy-metaint");
+    if (!r.ok || !r.body || !(every > 0)) throw new Error("bez metadat");
+    const rd = r.body.getReader();
+    let skipLeft = every, len = -1, meta = null, got = 0;
+    for (;;) {
+      const { value, done } = await rd.read();
+      if (done) break;
+      let i = 0;
+      while (i < value.length) {
+        if (skipLeft > 0) { const n = Math.min(skipLeft, value.length - i); skipLeft -= n; i += n; continue; }
+        if (len < 0) { len = value[i++] * 16; meta = new Uint8Array(len); if (!len) return null; continue; }
+        const n = Math.min(len - got, value.length - i);
+        meta.set(value.subarray(i, i + n), got); got += n; i += n;
+        if (got === len) {
+          const txt = new TextDecoder().decode(meta).replace(/\0+$/, "");
+          const m = /StreamTitle='(.*?)';/s.exec(txt);
+          return m ? m[1] : null;
+        }
+      }
+    }
+    return null;
+  } finally { clearTimeout(t); ac.abort(); }
+}
+
+let npTimer = null, npToken = 0;
 async function fetchNowPlaying() {
   clearTimeout(npTimer);
+  const tok = ++npToken;                         // jen jedno dotazování naráz
   const st = S.current;
-  if (!st || !st.np || !S.wantsPlaying || S.episode) return;
-  let line = "";
+  if (!st || !S.wantsPlaying || S.episode) return;
+  let line = "", wait = 30000;
   try {
     if (st.np === "kexp") {
       const r = (await (await fetch("https://api.kexp.org/v2/plays/?limit=1")).json()).results?.[0];
       if (r && r.play_type === "trackplay" && r.artist) line = `${r.artist} – ${r.song}`;
-    } else if (st.np === "fm4") {
-      const list = await (await fetch("https://audioapi.orf.at/fm4/json/current/live")).json();
-      const now = Date.now();
-      const b = list.find(x => x.start <= now && now <= x.end) || list[0];
-      if (b?.title) line = `Pořad: ${b.title.trim()}`;
-    } else if (st.np.startsWith("rozhlas:")) {
+    } else if (st.np?.startsWith("rozhlas:")) {
       const id = st.np.split(":")[1];
       const d = (await (await fetch(`https://api.rozhlas.cz/data/v2/playlist/now/${id}.json`)).json()).data;
       if (d && d.status === "playing" && (d.interpret || d.track)) line = [d.interpret, d.track].filter(Boolean).join(" – ");
+    } else if (st.np?.startsWith("fip:")) {
+      const id = st.np.split(":")[1];
+      const n = (await (await fetch(`https://api.radiofrance.fr/livemeta/live/${id}/transistor_musical_player`)).json()).now;
+      if (n?.secondLine && n.secondLineSongUuid) line = n.secondLine.replace(" • ", " – ");
+      if (n?.endTime) wait = Math.max(8000, Math.min(60000, n.endTime * 1000 - Date.now() + 5000));
+    } else if (st.np === "fm4") {                // ORF: aktuální pořad a v něm právě hraná skladba
+      const list = await (await fetch("https://audioapi.orf.at/fm4/json/current/live")).json();
+      const now = Date.now();
+      const b = list.find(x => x.start <= now && now <= x.end) || list[0];
+      if (b?.href) {
+        const items = (await (await fetch(b.href)).json()).items || [];
+        const m = items.find(x => x.type === "M" && x.start <= now && now <= x.end && (x.interpreter || x.title));
+        if (m) line = [m.interpreter, m.title].filter(Boolean).join(" – ");
+        else if (b.title) line = `Pořad: ${b.title.trim()}`;
+      }
+    } else if (!isHls(st.url) && !noIcy.has(st.url)) {
+      wait = 20000;
+      try {
+        const raw = await readIcy(st.url);
+        const t = cleanTitle(raw);
+        const low = t.toLowerCase();
+        if (t.length >= 3 && !JUNK.some(j => low.includes(j)) && low !== st.name.toLowerCase()) line = t;
+      } catch (e) { if (S.current === st && S.online && e?.name !== "AbortError") noIcy.add(st.url); }
     }
   } catch {}
-  if (S.current === st) { S.track = line; render(); }
-  npTimer = setTimeout(fetchNowPlaying, 30000);
+  if (tok !== npToken) return;
+  if (S.current === st && !S.episode) { S.track = line; render(); }
+  if (S.current === st) npTimer = setTimeout(fetchNowPlaying, wait);
 }
 
 // ---------- zobrazení ----------
@@ -526,6 +595,8 @@ $("searchBtn").addEventListener("click", () => openSearch(null));
 const seekEl = $("seek");
 seekEl.addEventListener("input", () => { S.scrubbing = true; $("seekNow").textContent = clock(+seekEl.value); });
 seekEl.addEventListener("change", () => { S.scrubbing = false; seekTo(+seekEl.value); });
+$("backBtn").addEventListener("click", () => skip(-SKIP));
+$("fwdBtn").addEventListener("click", () => skip(SKIP));
 const vol = $("volume");
 vol.value = audio.volume = store.get("vlnka.volume", 0.8);
 vol.addEventListener("input", () => { audio.volume = +vol.value; store.set("vlnka.volume", +vol.value); });
@@ -534,8 +605,8 @@ document.addEventListener("keydown", e => {
   if (e.target.closest("input, dialog, textarea") || e.metaKey || e.ctrlKey || e.altKey) return;
   if (e.key === " ") { e.preventDefault(); toggle(); }
   else if (/^[0-9]$/.test(e.key)) { const st = presets[(+e.key + 9) % 10]; if (st) play(st); }
-  else if (e.key === "ArrowRight") step(1);
-  else if (e.key === "ArrowLeft") step(-1);
+  else if (e.key === "ArrowRight") e.shiftKey ? skip(SKIP) : step(1);
+  else if (e.key === "ArrowLeft") e.shiftKey ? skip(-SKIP) : step(-1);
   else if (e.key === "Escape") closeMenu();
 });
 
@@ -553,14 +624,26 @@ function updateMediaSession() {
     });
   }
   navigator.mediaSession.playbackState = isActive() ? "playing" : "paused";
+  // epizoda: na zamčené obrazovce převinutí o 30 s; živě: přepínání stanic
+  const ep = !!S.episode;
+  if (ep !== msEpisode) {
+    msEpisode = ep;
+    msHandler("seekbackward", ep ? () => skip(-SKIP) : null);
+    msHandler("seekforward", ep ? () => skip(SKIP) : null);
+    msHandler("previoustrack", ep ? null : () => step(-1));
+    msHandler("nexttrack", ep ? null : () => step(1));
+  }
+  if (ep && navigator.mediaSession.setPositionState && audio.currentTime <= S.episode.duration) {
+    try { navigator.mediaSession.setPositionState({ duration: S.episode.duration, position: audio.currentTime || 0, playbackRate: 1 }); } catch {}
+  }
 }
+let msEpisode = null;
+const msHandler = (a, f) => { try { navigator.mediaSession.setActionHandler(a, f); } catch {} };
 if ("mediaSession" in navigator) {
   const h = (a, f) => { try { navigator.mediaSession.setActionHandler(a, f); } catch {} };
   h("play", () => { if (!isActive()) toggle(); });
   h("pause", () => { if (isActive()) pause(); });
   h("stop", stop);
-  h("nexttrack", () => step(1));
-  h("previoustrack", () => step(-1));
   h("seekto", d => { if (S.episode && d.seekTime != null) seekTo(d.seekTime); });
 }
 

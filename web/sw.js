@@ -1,5 +1,5 @@
 // Vlnka: aplikace se otevře i bez signálu; vždy se nejdřív zkusí čerstvá verze ze sítě.
-const CACHE = "vlnka-v1";
+const CACHE = "vlnka-v2";
 const SHELL = ["./", "index.html", "style.css", "app.js", "manifest.webmanifest",
   "icons/waves.svg", "icons/icon-192.png", "icons/icon-512.png", "icons/apple-touch-icon.png", "vendor/hls.min.js"];
 

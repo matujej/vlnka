@@ -194,3 +194,11 @@ input:focus { border-color: var(--olive); box-shadow: 0 0 0 3px color-mix(in srg
 .arow .sb { color: var(--muted); font-size: 12px; }
 .anote { padding: 4px 10px; }
 .link.small { font-size: 12.5px; padding: 0; }
+.times { align-items: center; }
+.skips { display: flex; gap: 6px; }
+.skip { display: inline-flex; align-items: center; gap: 5px; font: inherit; font-size: 13px; color: var(--olive);
+  background: none; border: 1px solid currentColor; border-radius: 999px; padding: 4px 11px; cursor: pointer; }
+.skip:hover { background: color-mix(in srgb, currentColor 10%, transparent); }
+.ico-back, .ico-fwd { width: 13px; height: 13px; }
+.ico-back { --m: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='black' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M3.5 6.5A5 5 0 1 1 3 9.5'/%3E%3Cpath d='M3 2.8v3.9h3.9'/%3E%3C/svg%3E"); }
+.ico-fwd { --m: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='black' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M12.5 6.5A5 5 0 1 0 13 9.5'/%3E%3Cpath d='M13 2.8v3.9H9.1'/%3E%3C/svg%3E"); }

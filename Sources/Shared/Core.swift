@@ -277,6 +277,12 @@ final class RadioModel: NSObject, ObservableObject, AVPlayerItemMetadataOutputPu
         updateNowPlayingInfo()
     }
 
+    /// Převinutí v epizodě o daný počet sekund (tlačítka ±30 s, Ovládací centrum).
+    func skip(by seconds: Double) {
+        guard let e = episode else { return }
+        seek(to: min(max(0, position + seconds), max(0, e.duration - 1)))
+    }
+
     func loadArchiveIfNeeded(force: Bool = false) {
         guard FM4Archive.isFM4(current), archiveState != .loading else { return }
         guard force || archiveState != .loaded || Date().timeIntervalSince(archiveLoadedAt) > 3600 else { return }
@@ -556,6 +562,16 @@ final class RadioModel: NSObject, ObservableObject, AVPlayerItemMetadataOutputPu
         c.stopCommand.addTarget { [weak self] _ in self?.stop(); return .success }
         c.nextTrackCommand.addTarget { [weak self] _ in self?.step(1); return .success }
         c.previousTrackCommand.addTarget { [weak self] _ in self?.step(-1); return .success }
+        c.skipBackwardCommand.preferredIntervals = [30]
+        c.skipForwardCommand.preferredIntervals = [30]
+        c.skipBackwardCommand.addTarget { [weak self] _ in
+            guard let self, self.episode != nil else { return .commandFailed }
+            self.skip(by: -30); return .success
+        }
+        c.skipForwardCommand.addTarget { [weak self] _ in
+            guard let self, self.episode != nil else { return .commandFailed }
+            self.skip(by: 30); return .success
+        }
         c.changePlaybackPositionCommand.addTarget { [weak self] ev in
             guard let self, self.episode != nil, let e = ev as? MPChangePlaybackPositionCommandEvent else { return .commandFailed }
             self.seek(to: e.positionTime)
@@ -583,7 +599,10 @@ final class RadioModel: NSObject, ObservableObject, AVPlayerItemMetadataOutputPu
             info[MPNowPlayingInfoPropertyElapsedPlaybackTime] = position
         }
         center.nowPlayingInfo = info
-        MPRemoteCommandCenter.shared().changePlaybackPositionCommand.isEnabled = episode != nil
+        let rc = MPRemoteCommandCenter.shared()
+        rc.changePlaybackPositionCommand.isEnabled = episode != nil
+        rc.skipBackwardCommand.isEnabled = episode != nil
+        rc.skipForwardCommand.isEnabled = episode != nil
         #if os(macOS)
         center.playbackState = isActive ? .playing : .paused
         #endif
@@ -848,8 +867,22 @@ struct ArchivePanel: View {
                     HStack {
                         Text(clock(scrub ?? m.position))
                         Spacer()
+                        Button { m.skip(by: -30) } label: {
+                            Label("30 s", systemImage: "gobackward.30").labelStyle(.titleAndIcon)
+                        }
+                        .help("Zpět o 30 s (⇧⌘←)")
+                        .foregroundStyle(Theme.olive)
+                        .keyboardShortcut(.leftArrow, modifiers: [.command, .shift])
+                        Button { m.skip(by: 30) } label: {
+                            Label("30 s", systemImage: "goforward.30").labelStyle(.titleAndIcon)
+                        }
+                        .help("Vpřed o 30 s (⇧⌘→)")
+                        .foregroundStyle(Theme.olive)
+                        .keyboardShortcut(.rightArrow, modifiers: [.command, .shift])
+                        Spacer()
                         Text(clock(e.duration))
                     }
+                    .buttonStyle(.plain)
                     .font(.ui(11).monospacedDigit())
                     .foregroundStyle(Theme.muted)
                 }

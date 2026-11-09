@@ -50,7 +50,14 @@
     <div id="archive" class="archive" hidden>
       <div id="archiveProgress" class="progress" hidden>
         <input id="seek" type="range" min="0" step="1" value="0" aria-label="Pozice v epizodě">
-        <div class="times muted tiny"><span id="seekNow">0:00:00</span><span id="seekEnd">0:00:00</span></div>
+        <div class="times muted tiny">
+          <span id="seekNow">0:00:00</span>
+          <span class="skips">
+            <button id="backBtn" class="skip" type="button" title="Zpět o 30 s (Shift+←)"><span class="ico ico-back"></span>30 s</button>
+            <button id="fwdBtn" class="skip" type="button" title="Vpřed o 30 s (Shift+→)">30 s<span class="ico ico-fwd"></span></button>
+          </span>
+          <span id="seekEnd">0:00:00</span>
+        </div>
       </div>
       <div id="archiveRows"></div>
     </div>
